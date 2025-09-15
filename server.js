@@ -105,57 +105,128 @@ app.post('/api/process-video', upload.any(), async (req, res) => {
   }
 
   try {
-    // settings.json 파일 찾기
-    const settingsFile = req.files?.find(file => 
-      file.fieldname === 'settings.json' || 
-      file.originalname === 'settings.json' ||
-      file.fieldname === 'settings'
-    );
+    // === 1단계: 파일 수신 및 매핑 테이블 생성 ===
+    console.log('\n🗂️ === 1단계: 파일 매핑 테이블 생성 ===');
+    
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: '업로드된 파일이 없습니다.',
+        details: 'multipart/form-data로 파일들을 업로드해주세요.'
+      });
+    }
 
-    if (!settingsFile) {
-      console.log('❌ settings.json 파일을 찾을 수 없습니다.');
-      console.log('수신된 파일 필드명들:', req.files?.map(f => `"${f.fieldname}"`).join(', ') || '없음');
+    // 파일명(키) → 실제 저장 경로(값) 매핑 테이블 생성
+    const fileMapping = new Map();
+    let settingsFilePath = null;
+
+    req.files.forEach((file, index) => {
+      console.log(`  📄 파일 ${index + 1}:`);
+      console.log(`     필드명: "${file.fieldname}"`);
+      console.log(`     원본명: "${file.originalname}"`);
+      console.log(`     실제경로: "${file.path}"`);
+      console.log(`     크기: ${file.size} bytes`);
       
+      // 매핑 테이블에 등록 (필드명과 원본명 모두로 접근 가능하도록)
+      fileMapping.set(file.fieldname, file.path);
+      fileMapping.set(file.originalname, file.path);
+      
+      // settings.json 파일 식별
+      if (file.fieldname === 'settings.json' || 
+          file.fieldname === 'settings' || 
+          file.originalname === 'settings.json') {
+        settingsFilePath = file.path;
+        console.log(`     ⭐ settings.json으로 식별됨`);
+      }
+    });
+
+    console.log('\n📋 생성된 파일 매핑 테이블:');
+    for (const [key, path] of fileMapping) {
+      console.log(`  "${key}" → "${path}"`);
+    }
+
+    if (!settingsFilePath) {
+      console.log('\n❌ settings.json 파일을 찾을 수 없습니다.');
       return res.status(400).json({
         success: false,
         error: 'settings.json 파일이 필요합니다.',
         details: 'settings.json 파일을 필드명 "settings.json", "settings" 또는 파일명 "settings.json"으로 업로드해주세요.',
-        receivedFiles: req.files?.map(f => ({
+        receivedFiles: req.files.map(f => ({
           fieldname: f.fieldname,
           originalname: f.originalname,
           mimetype: f.mimetype
-        })) || [],
+        })),
         expectedFieldNames: ['settings.json', 'settings']
       });
     }
 
-    // settings.json 파싱
-    const settingsContent = await fs.readFile(settingsFile.path, 'utf8');
+    // === 2단계: settings.json 읽기 및 파싱 ===
+    console.log('\n📖 === 2단계: settings.json 파싱 ===');
+    const settingsContent = await fs.readFile(settingsFilePath, 'utf8');
     let settings;
+    
     try {
       settings = JSON.parse(settingsContent);
       console.log('✅ settings.json 파싱 완료');
-      console.log('영상 설정:', {
-        duration: settings.duration,
-        resolution: settings.global?.resolution,
-        scenes: settings.scenes?.length || 0,
-        subtitles: settings.subtitles?.length || 0
-      });
+      console.log('📊 영상 설정 요약:');
+      console.log(`  - 지속시간: ${settings.duration || 'N/A'}초`);
+      console.log(`  - 해상도: ${settings.global?.resolution || 'N/A'}`);
+      console.log(`  - 씬 개수: ${settings.scenes?.length || 0}개`);
+      console.log(`  - 자막 개수: ${settings.subtitles?.length || 0}개`);
     } catch (parseError) {
       throw new Error(`settings.json 파싱 오류: ${parseError.message}`);
     }
 
-    // 미디어 파일들을 파일명으로 매핑
-    const mediaFiles = {};
-    if (req.files) {
-      req.files.forEach(file => {
-        if (file !== settingsFile) {
-          mediaFiles[file.originalname] = file.path;
+    // === 3단계: 필요한 파일들 존재 여부 검증 ===
+    console.log('\n🔍 === 3단계: 필요한 파일들 존재 여부 검증 ===');
+    const missingFiles = [];
+    
+    // 씬에서 사용하는 이미지 파일들 검증
+    if (settings.scenes) {
+      settings.scenes.forEach((scene, index) => {
+        if (scene.image) {
+          const imagePath = fileMapping.get(scene.image);
+          if (imagePath) {
+            console.log(`  ✅ 씬 ${index} 이미지: "${scene.image}" → "${imagePath}"`);
+          } else {
+            console.log(`  ❌ 씬 ${index} 이미지 누락: "${scene.image}"`);
+            missingFiles.push(scene.image);
+          }
         }
       });
     }
 
-    console.log('미디어 파일 매핑:', Object.keys(mediaFiles));
+    // 배경음악 파일 검증
+    if (settings.global?.backgroundMusic) {
+      const bgmPath = fileMapping.get(settings.global.backgroundMusic);
+      if (bgmPath) {
+        console.log(`  ✅ 배경음악: "${settings.global.backgroundMusic}" → "${bgmPath}"`);
+      } else {
+        console.log(`  ❌ 배경음악 누락: "${settings.global.backgroundMusic}"`);
+        missingFiles.push(settings.global.backgroundMusic);
+      }
+    }
+
+    // TTS 오디오 파일들 검증
+    if (settings.subtitles) {
+      settings.subtitles.forEach((subtitle, index) => {
+        if (subtitle.audioFile) {
+          const audioPath = fileMapping.get(subtitle.audioFile);
+          if (audioPath) {
+            console.log(`  ✅ TTS ${index}: "${subtitle.audioFile}" → "${audioPath}"`);
+          } else {
+            console.log(`  ❌ TTS ${index} 누락: "${subtitle.audioFile}"`);
+            missingFiles.push(subtitle.audioFile);
+          }
+        }
+      });
+    }
+
+    if (missingFiles.length > 0) {
+      throw new Error(`필요한 파일들이 누락되었습니다: ${missingFiles.join(', ')}`);
+    }
+
+    console.log('✅ 모든 필요한 파일들이 확인되었습니다.');
 
     // 출력 파일 경로
     const outputFileName = `assembled-${Date.now()}.mp4`;
@@ -166,126 +237,146 @@ app.post('/api/process-video', upload.any(), async (req, res) => {
     const resolution = globalSettings.resolution || '1280x720';
     const duration = settings.duration || 10;
 
-    console.log('FFmpeg 영상 조립 시작...');
+    // === 4단계: 매핑 테이블 기반 FFmpeg 영상 조립 ===
+    console.log('\n🎬 === 4단계: FFmpeg 영상 조립 시작 ===');
 
-    // 씬 기반 영상 조립
-    if (settings.scenes && settings.scenes.length > 0) {
-      // 첫 번째 씬의 이미지를 베이스로 사용
-      const firstScene = settings.scenes[0];
-      const firstImageFile = mediaFiles[firstScene.image];
-      
-      if (!firstImageFile) {
-        throw new Error(`첫 번째 씬의 이미지 파일을 찾을 수 없습니다: ${firstScene.image}`);
-      }
-
-      // FFmpeg 명령어 구성
-      let ffmpegCommand = ffmpeg();
-
-      // 이미지 기반 영상 생성
-      ffmpegCommand = ffmpegCommand
-        .input(firstImageFile)
-        .inputOptions(['-loop', '1', '-t', duration.toString()])
-        .output(outputPath)
-        .videoCodec('libx264')
-        .audioCodec('aac')
-        .size(resolution)
-        .format('mp4')
-        .outputOptions([
-          '-preset', 'fast',
-          '-crf', '23',
-          '-movflags', '+faststart'
-        ]);
-
-      // 배경음악 추가
-      if (globalSettings.backgroundMusic && mediaFiles[globalSettings.backgroundMusic]) {
-        ffmpegCommand = ffmpegCommand.input(mediaFiles[globalSettings.backgroundMusic]);
-        console.log('배경음악 추가:', globalSettings.backgroundMusic);
-      }
-
-      // TTS 오디오 파일들 수집
-      const audioInputs = [];
-      let audioIndex = 2; // 0: 이미지, 1: 배경음악, 2부터: TTS
-
-      if (settings.subtitles) {
-        settings.subtitles.forEach((subtitle, index) => {
-          if (subtitle.audioFile && mediaFiles[subtitle.audioFile]) {
-            ffmpegCommand = ffmpegCommand.input(mediaFiles[subtitle.audioFile]);
-            audioInputs.push({
-              index: audioIndex,
-              startTime: subtitle.startTime || 0,
-              duration: subtitle.duration || 2
-            });
-            audioIndex++;
-            console.log(`TTS 오디오 추가: ${subtitle.audioFile} (${subtitle.startTime}s)`);
-          }
-        });
-      }
-
-      // 오디오 믹싱 설정
-      if (audioInputs.length > 0) {
-        let filterComplex = [];
-        
-        // 배경음악 볼륨 조절
-        if (globalSettings.backgroundMusic && mediaFiles[globalSettings.backgroundMusic]) {
-          const bgVolume = globalSettings.backgroundMusicVolume || 0.3;
-          filterComplex.push(`[1:a]volume=${bgVolume}[bg]`);
-        }
-
-        // TTS 오디오들 처리
-        audioInputs.forEach((audio, idx) => {
-          const volume = globalSettings.voiceVolume || 1.0;
-          filterComplex.push(`[${audio.index}:a]volume=${volume}[tts${idx}]`);
-        });
-
-        // 최종 믹싱
-        const mixInputs = [];
-        if (globalSettings.backgroundMusic) mixInputs.push('[bg]');
-        audioInputs.forEach((_, idx) => mixInputs.push(`[tts${idx}]`));
-
-        if (mixInputs.length > 1) {
-          filterComplex.push(`${mixInputs.join('')}amix=inputs=${mixInputs.length}:duration=longest[aout]`);
-          ffmpegCommand = ffmpegCommand
-            .complexFilter(filterComplex)
-            .outputOptions(['-map', '0:v', '-map', '[aout]']);
-        }
-      }
-
-      // FFmpeg 실행
-      await new Promise((resolve, reject) => {
-        ffmpegCommand
-          .on('start', (cmd) => {
-            console.log('FFmpeg 명령어:', cmd);
-          })
-          .on('progress', (progress) => {
-            if (progress.percent) {
-              console.log('조립 진행률:', Math.round(progress.percent) + '%');
-            }
-          })
-          .on('end', () => {
-            console.log('✅ 영상 조립 완료');
-            resolve();
-          })
-          .on('error', (err) => {
-            console.error('❌ FFmpeg 조립 오류:', err);
-            reject(err);
-          })
-          .run();
-      });
-
-    } else {
+    if (!settings.scenes || settings.scenes.length === 0) {
       throw new Error('settings.json에 scenes 배열이 필요합니다.');
     }
 
+    // 첫 번째 씬의 이미지를 베이스로 사용
+    const firstScene = settings.scenes[0];
+    const firstImagePath = fileMapping.get(firstScene.image);
+    
+    console.log(`🖼️ 베이스 이미지: "${firstScene.image}" → "${firstImagePath}"`);
+
+    // FFmpeg 명령어 구성
+    let ffmpegCommand = ffmpeg();
+
+    // 이미지 기반 영상 생성
+    ffmpegCommand = ffmpegCommand
+      .input(firstImagePath)
+      .inputOptions(['-loop', '1', '-t', duration.toString()])
+      .output(outputPath)
+      .videoCodec('libx264')
+      .audioCodec('aac')
+      .size(resolution)
+      .format('mp4')
+      .outputOptions([
+        '-preset', 'fast',
+        '-crf', '23',
+        '-movflags', '+faststart'
+      ]);
+
+    console.log(`📐 영상 설정: ${resolution}, ${duration}초`);
+
+    // 배경음악 추가
+    if (globalSettings.backgroundMusic) {
+      const bgmPath = fileMapping.get(globalSettings.backgroundMusic);
+      if (bgmPath) {
+        ffmpegCommand = ffmpegCommand.input(bgmPath);
+        console.log(`🎵 배경음악 추가: "${globalSettings.backgroundMusic}" → "${bgmPath}"`);
+      }
+    }
+
+    // TTS 오디오 파일들 수집
+    const audioInputs = [];
+    let audioIndex = globalSettings.backgroundMusic ? 2 : 1; // 0: 이미지, 1: 배경음악(있으면), 그 다음: TTS
+
+    if (settings.subtitles) {
+      settings.subtitles.forEach((subtitle, index) => {
+        if (subtitle.audioFile) {
+          const audioPath = fileMapping.get(subtitle.audioFile);
+          if (audioPath) {
+            ffmpegCommand = ffmpegCommand.input(audioPath);
+            audioInputs.push({
+              index: audioIndex,
+              startTime: subtitle.startTime || 0,
+              duration: subtitle.duration || 2,
+              fileName: subtitle.audioFile
+            });
+            audioIndex++;
+            console.log(`🗣️ TTS ${index} 추가: "${subtitle.audioFile}" → "${audioPath}" (${subtitle.startTime}s)`);
+          }
+        }
+      });
+    }
+
+    // 오디오 믹싱 설정
+    if (audioInputs.length > 0) {
+      console.log('\n🎵 === 오디오 믹싱 설정 ===');
+      let filterComplex = [];
+      
+      // 배경음악 볼륨 조절
+      if (globalSettings.backgroundMusic) {
+        const bgVolume = globalSettings.backgroundMusicVolume || 0.3;
+        filterComplex.push(`[1:a]volume=${bgVolume}[bg]`);
+        console.log(`🎼 배경음악 볼륨: ${bgVolume}`);
+      }
+
+      // TTS 오디오들 처리
+      audioInputs.forEach((audio, idx) => {
+        const volume = globalSettings.voiceVolume || 1.0;
+        filterComplex.push(`[${audio.index}:a]volume=${volume}[tts${idx}]`);
+        console.log(`🗣️ TTS ${idx} (${audio.fileName}) 볼륨: ${volume}`);
+      });
+
+      // 최종 믹싱
+      const mixInputs = [];
+      if (globalSettings.backgroundMusic) mixInputs.push('[bg]');
+      audioInputs.forEach((_, idx) => mixInputs.push(`[tts${idx}]`));
+
+      if (mixInputs.length > 1) {
+        filterComplex.push(`${mixInputs.join('')}amix=inputs=${mixInputs.length}:duration=longest[aout]`);
+        ffmpegCommand = ffmpegCommand
+          .complexFilter(filterComplex)
+          .outputOptions(['-map', '0:v', '-map', '[aout]']);
+        console.log(`🎛️ 오디오 믹싱: ${mixInputs.length}개 트랙`);
+      }
+    }
+
+    // FFmpeg 실행
+    console.log('\n⚙️ === FFmpeg 실행 ===');
+    await new Promise((resolve, reject) => {
+      ffmpegCommand
+        .on('start', (cmd) => {
+          console.log('🚀 FFmpeg 명령어 시작');
+          console.log('명령어:', cmd.substring(0, 200) + '...');
+        })
+        .on('progress', (progress) => {
+          if (progress.percent) {
+            console.log(`📊 조립 진행률: ${Math.round(progress.percent)}%`);
+          }
+        })
+        .on('end', () => {
+          console.log('✅ 영상 조립 완료');
+          resolve();
+        })
+        .on('error', (err) => {
+          console.error('❌ FFmpeg 조립 오류:', err);
+          reject(err);
+        })
+        .run();
+    });
+
     // 원본 파일들 정리
+    console.log('\n🧹 === 임시 파일 정리 ===');
     if (req.files) {
       for (const file of req.files) {
-        await fs.remove(file.path);
+        try {
+          await fs.remove(file.path);
+          console.log(`  ✅ 삭제: ${file.originalname}`);
+        } catch (cleanupError) {
+          console.log(`  ⚠️ 삭제 실패: ${file.originalname} - ${cleanupError.message}`);
+        }
       }
     }
 
     // 결과 파일 읽기
+    console.log('\n📤 === 결과 파일 처리 ===');
     const assembledBuffer = await fs.readFile(outputPath);
     const assembledBase64 = assembledBuffer.toString('base64');
+    console.log(`📊 최종 영상 크기: ${assembledBuffer.length} bytes`);
 
     res.json({
       success: true,
@@ -299,7 +390,8 @@ app.post('/api/process-video', upload.any(), async (req, res) => {
         resolution: globalSettings.resolution,
         scenes: settings.scenes?.length || 0,
         subtitles: settings.subtitles?.length || 0,
-        mediaFiles: Object.keys(mediaFiles).length
+        totalFiles: req.files?.length || 0,
+        mappedFiles: fileMapping.size
       }
     });
 
