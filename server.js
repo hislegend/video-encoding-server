@@ -305,10 +305,13 @@ app.post('/upload-youtube', async (req, res) => {
 });
 
 // 서버 시작
-app.listen(PORT, () => {
-  console.log(`🚀 영상 인코딩 서버가 http://localhost:${PORT} 에서 실행 중입니다.`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 영상 인코딩 서버가 다음 주소에서 실행 중입니다:`);
+  console.log(`   - 로컬: http://localhost:${PORT}`);
+  console.log(`   - 네트워크: http://0.0.0.0:${PORT}`);
   console.log('📁 업로드 폴더:', uploadDir);
   console.log('📁 출력 폴더:', outputDir);
+  console.log('🌐 외부 서비스에서 접근 가능합니다.');
 });
 
 module.exports = app;
