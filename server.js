@@ -39,10 +39,20 @@ const storage = multer.diskStorage({
 const upload = multer({ 
   storage: storage,
   fileFilter: (req, file, cb) => {
-    // 비디오 파일만 허용
-    if (file.mimetype.startsWith('video/')) {
+    console.log('파일 필터 체크:', {
+      fieldname: file.fieldname,
+      originalname: file.originalname,
+      mimetype: file.mimetype,
+      size: file.size
+    });
+    
+    // 비디오 파일만 허용 (더 관대한 필터링)
+    if (file.mimetype.startsWith('video/') || 
+        file.mimetype === 'application/octet-stream' ||
+        file.originalname.match(/\.(mp4|avi|mov|wmv|flv|webm|mkv)$/i)) {
       cb(null, true);
     } else {
+      console.error('지원하지 않는 파일 형식:', file.mimetype);
       cb(new Error('비디오 파일만 업로드 가능합니다.'), false);
     }
   },
@@ -157,10 +167,20 @@ app.post('/api/process-video', upload.single('video'), async (req, res) => {
     // FormData로 전송된 파일 처리
     if (req.file) {
       console.log('파일 업로드 방식으로 처리:', req.file.originalname);
+      console.log('파일 정보:', {
+        path: req.file.path,
+        size: req.file.size,
+        mimetype: req.file.mimetype
+      });
       
       const inputPath = req.file.path;
       const outputFileName = `processed-${Date.now()}.mp4`;
       const outputPath = path.join(outputDir, outputFileName);
+
+      // 파일 존재 확인
+      if (!await fs.pathExists(inputPath)) {
+        throw new Error('업로드된 파일을 찾을 수 없습니다.');
+      }
 
       // 설정값 파싱 (FormData에서 문자열로 전송됨)
       let settings = {};
@@ -172,14 +192,22 @@ app.post('/api/process-video', upload.single('video'), async (req, res) => {
         }
       }
 
-      // FFmpeg 인코딩
+      console.log('FFmpeg 인코딩 시작...');
+
+      // FFmpeg 인코딩 (더 안전한 설정)
       const ffmpegCommand = ffmpeg(inputPath)
         .output(outputPath)
         .videoCodec('libx264')
         .audioCodec('aac')
         .size(settings?.resolution || '1280x720')
         .videoBitrate(settings?.videoBitrate || '1000k')
-        .audioBitrate(settings?.audioBitrate || '128k');
+        .audioBitrate(settings?.audioBitrate || '128k')
+        .format('mp4')
+        .outputOptions([
+          '-preset fast',
+          '-crf 23',
+          '-movflags +faststart'
+        ]);
 
       await new Promise((resolve, reject) => {
         ffmpegCommand
@@ -187,15 +215,17 @@ app.post('/api/process-video', upload.single('video'), async (req, res) => {
             console.log('FFmpeg 명령어:', commandLine);
           })
           .on('progress', (progress) => {
-            console.log('진행률:', Math.round(progress.percent) + '%');
+            if (progress.percent) {
+              console.log('진행률:', Math.round(progress.percent) + '%');
+            }
           })
           .on('end', () => {
             console.log('외부 서비스 영상 처리 완료:', outputFileName);
             resolve();
           })
           .on('error', (err) => {
-            console.error('인코딩 오류:', err);
-            reject(err);
+            console.error('FFmpeg 인코딩 오류:', err);
+            reject(new Error(`FFmpeg 오류: ${err.message}`));
           })
           .run();
       });
@@ -203,9 +233,19 @@ app.post('/api/process-video', upload.single('video'), async (req, res) => {
       // 원본 파일 삭제
       await fs.remove(inputPath);
 
+      // 출력 파일 존재 확인
+      if (!await fs.pathExists(outputPath)) {
+        throw new Error('인코딩된 파일이 생성되지 않았습니다.');
+      }
+
       // 처리된 파일을 base64로 변환
       const processedBuffer = await fs.readFile(outputPath);
       const processedBase64 = processedBuffer.toString('base64');
+
+      console.log('응답 전송:', {
+        outputFile: outputFileName,
+        fileSize: processedBuffer.length
+      });
 
       res.json({
         success: true,
@@ -297,10 +337,22 @@ app.post('/api/process-video', upload.single('video'), async (req, res) => {
 
   } catch (error) {
     console.error('외부 서비스 영상 처리 오류:', error);
+    console.error('오류 스택:', error.stack);
+    
+    // 파일 정리
+    try {
+      if (req.file && req.file.path) {
+        await fs.remove(req.file.path);
+      }
+    } catch (cleanupError) {
+      console.error('파일 정리 오류:', cleanupError);
+    }
+    
     res.status(500).json({ 
       success: false,
       error: '영상 처리 중 오류가 발생했습니다.',
-      details: error.message 
+      details: error.message,
+      errorType: error.name || 'UnknownError'
     });
   }
 });
