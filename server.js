@@ -12,9 +12,22 @@ const PORT = process.env.PORT || 3000;
 // 미들웨어 설정
 app.use(cors({
   origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+  credentials: false
 }));
+
+// 요청 로깅 미들웨어
+app.use((req, res, next) => {
+  console.log(`\n=== ${new Date().toISOString()} ===`);
+  console.log(`${req.method} ${req.url}`);
+  console.log('Headers:', JSON.stringify(req.headers, null, 2));
+  console.log('Content-Type:', req.headers['content-type']);
+  console.log('Origin:', req.headers.origin);
+  console.log('User-Agent:', req.headers['user-agent']);
+  next();
+});
+
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 app.use(express.static('public'));
@@ -61,14 +74,34 @@ app.get('/', (req, res) => {
 
 // 라우트: settings.json 기반 영상 조립 API
 app.post('/api/process-video', upload.any(), async (req, res) => {
-  console.log('=== settings.json 기반 영상 조립 요청 수신 ===');
-  console.log('업로드된 파일 수:', req.files ? req.files.length : 0);
-  console.log('Body 데이터:', Object.keys(req.body || {}));
+  console.log('\n🎬 === settings.json 기반 영상 조립 요청 수신 ===');
+  console.log('📊 요청 정보:');
+  console.log('  - 업로드된 파일 수:', req.files ? req.files.length : 0);
+  console.log('  - Body 데이터 키:', Object.keys(req.body || {}));
+  console.log('  - Content-Type:', req.headers['content-type']);
+  console.log('  - Content-Length:', req.headers['content-length']);
   
-  if (req.files) {
-    req.files.forEach(file => {
-      console.log(`파일: ${file.fieldname} - ${file.originalname} (${file.mimetype})`);
+  console.log('\n📁 업로드된 파일 상세:');
+  if (req.files && req.files.length > 0) {
+    req.files.forEach((file, index) => {
+      console.log(`  ${index + 1}. 필드명: "${file.fieldname}"`);
+      console.log(`     원본명: "${file.originalname}"`);
+      console.log(`     MIME타입: ${file.mimetype}`);
+      console.log(`     크기: ${file.size} bytes`);
+      console.log(`     저장경로: ${file.path}`);
     });
+  } else {
+    console.log('  ❌ 업로드된 파일이 없습니다.');
+  }
+  
+  console.log('\n📝 Body 데이터 상세:');
+  if (req.body && Object.keys(req.body).length > 0) {
+    Object.keys(req.body).forEach(key => {
+      const value = req.body[key];
+      console.log(`  ${key}: ${typeof value} (길이: ${value?.length || 'N/A'})`);
+    });
+  } else {
+    console.log('  ❌ Body 데이터가 없습니다.');
   }
 
   try {
@@ -80,10 +113,19 @@ app.post('/api/process-video', upload.any(), async (req, res) => {
     );
 
     if (!settingsFile) {
+      console.log('❌ settings.json 파일을 찾을 수 없습니다.');
+      console.log('수신된 파일 필드명들:', req.files?.map(f => `"${f.fieldname}"`).join(', ') || '없음');
+      
       return res.status(400).json({
         success: false,
         error: 'settings.json 파일이 필요합니다.',
-        receivedFiles: req.files?.map(f => f.fieldname) || []
+        details: 'settings.json 파일을 필드명 "settings.json", "settings" 또는 파일명 "settings.json"으로 업로드해주세요.',
+        receivedFiles: req.files?.map(f => ({
+          fieldname: f.fieldname,
+          originalname: f.originalname,
+          mimetype: f.mimetype
+        })) || [],
+        expectedFieldNames: ['settings.json', 'settings']
       });
     }
 
@@ -262,15 +304,20 @@ app.post('/api/process-video', upload.any(), async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ 영상 조립 오류:', error);
+    console.error('\n💥 === 영상 조립 오류 발생 ===');
+    console.error('오류 타입:', error.constructor.name);
+    console.error('오류 메시지:', error.message);
+    console.error('오류 스택:', error.stack);
     
     // 파일 정리
     if (req.files) {
+      console.log('🧹 업로드된 파일들 정리 중...');
       for (const file of req.files) {
         try {
           await fs.remove(file.path);
+          console.log(`  ✅ 삭제 완료: ${file.path}`);
         } catch (cleanupError) {
-          console.error('파일 정리 오류:', cleanupError);
+          console.error(`  ❌ 삭제 실패: ${file.path}`, cleanupError.message);
         }
       }
     }
@@ -278,7 +325,9 @@ app.post('/api/process-video', upload.any(), async (req, res) => {
     res.status(500).json({
       success: false,
       error: '영상 조립 중 오류가 발생했습니다.',
-      details: error.message
+      details: error.message,
+      errorType: error.constructor.name,
+      timestamp: new Date().toISOString()
     });
   }
 });
@@ -297,22 +346,73 @@ app.get('/download/:filename', (req, res) => {
 
 // 라우트: 상태 확인 API
 app.get('/api/status', (req, res) => {
+  console.log('📊 상태 확인 요청 수신');
   res.json({
     success: true,
     message: '영상 인코딩 서버가 정상 작동 중입니다.',
     timestamp: new Date().toISOString(),
+    server: {
+      nodeVersion: process.version,
+      platform: process.platform,
+      uptime: process.uptime(),
+      memoryUsage: process.memoryUsage()
+    },
     endpoints: {
-      processVideo: '/api/process-video',
-      download: '/download/:filename',
-      status: '/api/status'
+      processVideo: '/api/process-video (POST)',
+      testUpload: '/api/test-upload (POST)',
+      download: '/download/:filename (GET)',
+      status: '/api/status (GET)'
     },
     features: {
       settingsBasedAssembly: 'settings.json 기반 영상 조립',
-      multiFileUpload: '다중 파일 업로드 지원',
+      multiFileUpload: '다중 파일 업로드 지원 (최대 50개, 각 500MB)',
       audioMixing: '배경음악 + TTS 오디오 믹싱',
-      imageToVideo: '이미지를 영상으로 변환'
+      imageToVideo: '이미지를 영상으로 변환',
+      corsEnabled: 'CORS 모든 도메인 허용',
+      debugLogging: '상세 디버깅 로그 활성화'
+    },
+    cors: {
+      origin: '*',
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin']
     }
   });
+});
+
+// 라우트: 업로드 테스트 API
+app.post('/api/test-upload', upload.any(), (req, res) => {
+  console.log('\n🧪 === 업로드 테스트 요청 수신 ===');
+  console.log('업로드된 파일 수:', req.files ? req.files.length : 0);
+  console.log('Body 키:', Object.keys(req.body || {}));
+  
+  res.json({
+    success: true,
+    message: '업로드 테스트 성공',
+    receivedFiles: req.files?.map(f => ({
+      fieldname: f.fieldname,
+      originalname: f.originalname,
+      mimetype: f.mimetype,
+      size: f.size
+    })) || [],
+    receivedBody: req.body || {},
+    headers: {
+      contentType: req.headers['content-type'],
+      contentLength: req.headers['content-length'],
+      origin: req.headers.origin
+    },
+    timestamp: new Date().toISOString()
+  });
+  
+  // 테스트 파일들 정리
+  if (req.files) {
+    req.files.forEach(async (file) => {
+      try {
+        await fs.remove(file.path);
+      } catch (err) {
+        console.error('테스트 파일 정리 오류:', err);
+      }
+    });
+  }
 });
 
 // 서버 시작
