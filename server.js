@@ -154,9 +154,228 @@ app.get('/files', (req, res) => {
   }
 });
 
-// 라우트: 외부 서비스용 영상 처리 API (완전 개방형)
+// Multer 설정 (다중 파일 업로드)
+const multiUpload = multer({ 
+  storage: storage,
+  fileFilter: (req, file, cb) => {
+    console.log('파일 필터 체크:', {
+      fieldname: file.fieldname,
+      originalname: file.originalname,
+      mimetype: file.mimetype
+    });
+    
+    // 영상, 오디오, 이미지, 텍스트 파일 허용
+    if (file.mimetype.startsWith('video/') || 
+        file.mimetype.startsWith('audio/') ||
+        file.mimetype.startsWith('image/') ||
+        file.mimetype === 'text/plain' ||
+        file.mimetype === 'application/json' ||
+        file.mimetype === 'application/octet-stream') {
+      cb(null, true);
+    } else {
+      console.error('지원하지 않는 파일 형식:', file.mimetype);
+      cb(new Error('지원하지 않는 파일 형식입니다.'), false);
+    }
+  },
+  limits: {
+    fileSize: 500 * 1024 * 1024, // 500MB 제한
+    files: 20 // 최대 20개 파일
+  }
+});
+
+// 라우트: 영상 에셋 조합 API
+app.post('/api/compose-video', multiUpload.any(), async (req, res) => {
+  console.log('=== 영상 조합 요청 수신 ===');
+  console.log('업로드된 파일 수:', req.files ? req.files.length : 0);
+  console.log('Body 데이터:', Object.keys(req.body || {}));
+  
+  if (req.files) {
+    req.files.forEach(file => {
+      console.log(`파일: ${file.fieldname} - ${file.originalname} (${file.mimetype})`);
+    });
+  }
+
+  try {
+    // 파일들을 타입별로 분류
+    const assets = {
+      videos: [],
+      audios: [],
+      images: [],
+      subtitles: []
+    };
+
+    if (req.files) {
+      req.files.forEach(file => {
+        if (file.mimetype.startsWith('video/')) {
+          assets.videos.push(file);
+        } else if (file.mimetype.startsWith('audio/')) {
+          assets.audios.push(file);
+        } else if (file.mimetype.startsWith('image/')) {
+          assets.images.push(file);
+        } else if (file.mimetype === 'text/plain' || file.fieldname.includes('subtitle')) {
+          assets.subtitles.push(file);
+        }
+      });
+    }
+
+    console.log('에셋 분류 결과:', {
+      videos: assets.videos.length,
+      audios: assets.audios.length,
+      images: assets.images.length,
+      subtitles: assets.subtitles.length
+    });
+
+    // 조합 설정 파싱
+    let composeSettings = {};
+    if (req.body.settings) {
+      try {
+        composeSettings = JSON.parse(req.body.settings);
+      } catch (e) {
+        console.log('설정값 파싱 실패, 기본값 사용');
+      }
+    }
+
+    // 출력 파일 경로
+    const outputFileName = `composed-${Date.now()}.mp4`;
+    const outputPath = path.join(outputDir, outputFileName);
+
+    // FFmpeg 명령어 구성
+    let ffmpegCommand = ffmpeg();
+
+    // 입력 파일들 추가
+    assets.videos.forEach(video => {
+      ffmpegCommand = ffmpegCommand.input(video.path);
+    });
+    
+    assets.audios.forEach(audio => {
+      ffmpegCommand = ffmpegCommand.input(audio.path);
+    });
+
+    assets.images.forEach(image => {
+      ffmpegCommand = ffmpegCommand.input(image.path);
+    });
+
+    // 기본 영상 조합 (첫 번째 영상을 베이스로 사용)
+    if (assets.videos.length > 0) {
+      ffmpegCommand = ffmpegCommand
+        .output(outputPath)
+        .videoCodec('libx264')
+        .audioCodec('aac')
+        .size(composeSettings?.resolution || '1280x720')
+        .videoBitrate(composeSettings?.videoBitrate || '1000k')
+        .audioBitrate(composeSettings?.audioBitrate || '128k')
+        .format('mp4');
+
+      // 오디오 믹싱 (여러 오디오 파일이 있는 경우)
+      if (assets.audios.length > 0) {
+        const audioFilters = [];
+        for (let i = 0; i < assets.audios.length; i++) {
+          audioFilters.push(`[${assets.videos.length + i}:a]`);
+        }
+        if (assets.videos.length > 0) {
+          audioFilters.unshift('[0:a]');
+        }
+        
+        if (audioFilters.length > 1) {
+          ffmpegCommand = ffmpegCommand.complexFilter([
+            `${audioFilters.join('')}amix=inputs=${audioFilters.length}:duration=longest[aout]`
+          ]).outputOptions(['-map', '0:v', '-map', '[aout]']);
+        }
+      }
+    } else if (assets.images.length > 0) {
+      // 이미지만 있는 경우 슬라이드쇼 생성
+      const duration = composeSettings?.imageDuration || 3; // 각 이미지 3초
+      
+      ffmpegCommand = ffmpegCommand
+        .input(assets.images[0].path)
+        .inputOptions(['-loop', '1', '-t', duration.toString()])
+        .output(outputPath)
+        .videoCodec('libx264')
+        .size(composeSettings?.resolution || '1280x720')
+        .format('mp4');
+
+      if (assets.audios.length > 0) {
+        ffmpegCommand = ffmpegCommand.input(assets.audios[0].path);
+      }
+    } else {
+      throw new Error('영상 또는 이미지 파일이 필요합니다.');
+    }
+
+    console.log('FFmpeg 조합 시작...');
+
+    // FFmpeg 실행
+    await new Promise((resolve, reject) => {
+      ffmpegCommand
+        .on('start', (cmd) => {
+          console.log('FFmpeg 명령어:', cmd);
+        })
+        .on('progress', (progress) => {
+          if (progress.percent) {
+            console.log('조합 진행률:', Math.round(progress.percent) + '%');
+          }
+        })
+        .on('end', () => {
+          console.log('✅ 영상 조합 완료');
+          resolve();
+        })
+        .on('error', (err) => {
+          console.error('❌ FFmpeg 조합 오류:', err);
+          reject(err);
+        })
+        .run();
+    });
+
+    // 원본 파일들 정리
+    if (req.files) {
+      for (const file of req.files) {
+        await fs.remove(file.path);
+      }
+    }
+
+    // 결과 파일 읽기
+    const composedBuffer = await fs.readFile(outputPath);
+    const composedBase64 = composedBuffer.toString('base64');
+
+    res.json({
+      success: true,
+      message: '영상 조합이 완료되었습니다.',
+      outputFile: outputFileName,
+      downloadUrl: `/download/${outputFileName}`,
+      composedData: `data:video/mp4;base64,${composedBase64}`,
+      fileSize: composedBuffer.length,
+      assetsProcessed: {
+        videos: assets.videos.length,
+        audios: assets.audios.length,
+        images: assets.images.length,
+        subtitles: assets.subtitles.length
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ 영상 조합 오류:', error);
+    
+    // 파일 정리
+    if (req.files) {
+      for (const file of req.files) {
+        try {
+          await fs.remove(file.path);
+        } catch (cleanupError) {
+          console.error('파일 정리 오류:', cleanupError);
+        }
+      }
+    }
+    
+    res.status(500).json({
+      success: false,
+      error: '영상 조합 중 오류가 발생했습니다.',
+      details: error.message
+    });
+  }
+});
+
+// 라우트: 기존 단일 영상 처리 API (호환성 유지)
 app.post('/api/process-video', async (req, res) => {
-  console.log('=== API 요청 수신 ===');
+  console.log('=== 단일 영상 처리 요청 수신 ===');
   console.log('Content-Type:', req.headers['content-type']);
   console.log('Content-Length:', req.headers['content-length']);
   console.log('Body keys:', Object.keys(req.body || {}));
@@ -341,9 +560,16 @@ app.get('/api/status', (req, res) => {
     endpoints: {
       upload: '/upload',
       processVideo: '/api/process-video',
+      composeVideo: '/api/compose-video',
       download: '/download/:filename',
       files: '/files',
       youtubeUpload: '/upload-youtube'
+    },
+    features: {
+      singleVideoProcessing: '단일 영상 파일 인코딩',
+      multiAssetComposition: '여러 에셋(영상,음성,이미지,자막) 조합',
+      audioMixing: '다중 오디오 트랙 믹싱',
+      imageSlideshow: '이미지 슬라이드쇼 생성'
     }
   });
 });
