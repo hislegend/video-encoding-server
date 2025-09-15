@@ -10,8 +10,13 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // 미들웨어 설정
-app.use(cors());
-app.use(express.json());
+app.use(cors({
+  origin: '*', // 모든 도메인에서 접근 허용 (개발용)
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+app.use(express.json({ limit: '100mb' })); // 대용량 데이터 처리
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 app.use(express.static('public'));
 
 // 업로드 디렉토리 생성
@@ -137,6 +142,111 @@ app.get('/files', (req, res) => {
     console.error('파일 목록 조회 오류:', error);
     res.status(500).json({ error: '파일 목록을 가져올 수 없습니다.' });
   }
+});
+
+// 라우트: 외부 서비스용 영상 처리 API
+app.post('/api/process-video', async (req, res) => {
+  try {
+    const { videoData, filename, settings } = req.body;
+    
+    if (!videoData) {
+      return res.status(400).json({ 
+        success: false,
+        error: '영상 데이터가 필요합니다.' 
+      });
+    }
+
+    // Base64 데이터를 파일로 저장
+    const inputFileName = filename || `input-${Date.now()}.mp4`;
+    const inputPath = path.join(uploadDir, inputFileName);
+    
+    // Base64 디코딩 및 파일 저장
+    let buffer;
+    if (videoData.startsWith('data:')) {
+      // data:video/mp4;base64,... 형태
+      const base64Data = videoData.split(',')[1];
+      buffer = Buffer.from(base64Data, 'base64');
+    } else {
+      // 순수 base64 데이터
+      buffer = Buffer.from(videoData, 'base64');
+    }
+    
+    await fs.writeFile(inputPath, buffer);
+    
+    const outputFileName = `processed-${Date.now()}.mp4`;
+    const outputPath = path.join(outputDir, outputFileName);
+
+    console.log('외부 서비스 영상 처리 시작:', inputFileName);
+
+    // FFmpeg를 사용한 비디오 인코딩
+    const ffmpegCommand = ffmpeg(inputPath)
+      .output(outputPath)
+      .videoCodec('libx264')
+      .audioCodec('aac')
+      .size(settings?.resolution || '1280x720')
+      .videoBitrate(settings?.videoBitrate || '1000k')
+      .audioBitrate(settings?.audioBitrate || '128k');
+
+    // 프로미스로 FFmpeg 실행
+    await new Promise((resolve, reject) => {
+      ffmpegCommand
+        .on('start', (commandLine) => {
+          console.log('FFmpeg 명령어:', commandLine);
+        })
+        .on('progress', (progress) => {
+          console.log('진행률:', Math.round(progress.percent) + '%');
+        })
+        .on('end', () => {
+          console.log('외부 서비스 영상 처리 완료:', outputFileName);
+          resolve();
+        })
+        .on('error', (err) => {
+          console.error('인코딩 오류:', err);
+          reject(err);
+        })
+        .run();
+    });
+
+    // 원본 파일 삭제
+    await fs.remove(inputPath);
+    
+    // 처리된 파일을 Base64로 인코딩하여 응답
+    const processedBuffer = await fs.readFile(outputPath);
+    const processedBase64 = processedBuffer.toString('base64');
+    
+    res.json({
+      success: true,
+      message: '영상 처리가 완료되었습니다.',
+      outputFile: outputFileName,
+      downloadUrl: `/download/${outputFileName}`,
+      processedData: `data:video/mp4;base64,${processedBase64}`,
+      fileSize: processedBuffer.length
+    });
+
+  } catch (error) {
+    console.error('외부 서비스 영상 처리 오류:', error);
+    res.status(500).json({ 
+      success: false,
+      error: '영상 처리 중 오류가 발생했습니다.',
+      details: error.message 
+    });
+  }
+});
+
+// 라우트: 간단한 상태 확인 API
+app.get('/api/status', (req, res) => {
+  res.json({
+    success: true,
+    message: '영상 인코딩 서버가 정상 작동 중입니다.',
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      upload: '/upload',
+      processVideo: '/api/process-video',
+      download: '/download/:filename',
+      files: '/files',
+      youtubeUpload: '/upload-youtube'
+    }
+  });
 });
 
 // 라우트: YouTube 업로드
