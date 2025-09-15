@@ -1,0 +1,14 @@
+[build]
+  command = "npm install"
+  publish = "public"
+
+[build.environment]
+  NODE_VERSION = "18"
+
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/server/:splat"
+  status = 200
+
+[functions]
+  node_bundler = "esbuild"
