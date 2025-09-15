@@ -4,6 +4,7 @@ const ffmpeg = require('fluent-ffmpeg');
 const path = require('path');
 const fs = require('fs-extra');
 const cors = require('cors');
+const GoogleStudioAPI = require('./google-studio');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -135,6 +136,61 @@ app.get('/files', (req, res) => {
   } catch (error) {
     console.error('파일 목록 조회 오류:', error);
     res.status(500).json({ error: '파일 목록을 가져올 수 없습니다.' });
+  }
+});
+
+// 라우트: YouTube 업로드
+app.post('/upload-youtube', async (req, res) => {
+  try {
+    const { filename, apiKey, title, description, privacy } = req.body;
+    
+    if (!filename || !apiKey) {
+      return res.status(400).json({ 
+        error: '파일명과 API 키가 필요합니다.' 
+      });
+    }
+
+    const filePath = path.join(outputDir, filename);
+    
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ 
+        error: '업로드할 파일을 찾을 수 없습니다.' 
+      });
+    }
+
+    const googleStudio = new GoogleStudioAPI(apiKey);
+    
+    // API 키 유효성 검사
+    const isValidKey = await googleStudio.validateApiKey();
+    if (!isValidKey) {
+      return res.status(401).json({ 
+        error: '유효하지 않은 Google API 키입니다.' 
+      });
+    }
+
+    const metadata = {
+      title: title || `인코딩된 비디오 - ${filename}`,
+      description: description || 'Video Encoding Server로 인코딩된 비디오입니다.',
+      privacy: privacy || 'private'
+    };
+
+    console.log('YouTube 업로드 시작:', filename);
+    const result = await googleStudio.uploadVideo(filePath, metadata);
+    
+    if (result.success) {
+      console.log('YouTube 업로드 완료:', result.url);
+      res.json(result);
+    } else {
+      console.error('YouTube 업로드 실패:', result.error);
+      res.status(500).json(result);
+    }
+
+  } catch (error) {
+    console.error('YouTube 업로드 오류:', error);
+    res.status(500).json({ 
+      error: 'YouTube 업로드 중 오류가 발생했습니다.',
+      details: error.message 
+    });
   }
 });
 

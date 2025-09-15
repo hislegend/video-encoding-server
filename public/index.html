@@ -202,6 +202,52 @@
         .google-studio-text {
             color: #856404;
             font-size: 0.9em;
+            margin-bottom: 15px;
+        }
+
+        .youtube-upload-form {
+            display: none;
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 15px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .form-group input,
+        .form-group textarea,
+        .form-group select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+
+        .form-group textarea {
+            height: 80px;
+            resize: vertical;
+        }
+
+        .youtube-btn {
+            background: linear-gradient(135deg, #ff0000 0%, #cc0000 100%);
+            color: white;
+            margin-top: 10px;
+        }
+
+        .youtube-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(255, 0, 0, 0.3);
         }
     </style>
 </head>
@@ -239,13 +285,49 @@
                 <button class="btn download-btn" id="downloadBtn" style="display: none;">
                     다운로드
                 </button>
+                <button class="btn youtube-btn" id="youtubeBtn" style="display: none;">
+                    YouTube에 업로드
+                </button>
             </div>
 
             <div class="google-studio-section">
-                <div class="google-studio-title">🎥 Google Studio 연동 안내</div>
+                <div class="google-studio-title">🎥 YouTube 업로드</div>
                 <div class="google-studio-text">
-                    인코딩된 영상은 Google Studio API를 통해 자동으로 업로드할 수 있습니다. 
-                    설정에서 API 키를 입력하시면 원클릭으로 Google Studio에 업로드됩니다.
+                    인코딩된 영상을 YouTube에 직접 업로드할 수 있습니다. 
+                    Google API 키를 입력하고 업로드 설정을 구성하세요.
+                </div>
+                <button class="btn" onclick="toggleYouTubeForm()">
+                    YouTube 업로드 설정
+                </button>
+                
+                <div class="youtube-upload-form" id="youtubeForm">
+                    <div class="form-group">
+                        <label for="apiKey">Google API 키 *</label>
+                        <input type="password" id="apiKey" placeholder="Google YouTube Data API v3 키를 입력하세요">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="videoTitle">비디오 제목</label>
+                        <input type="text" id="videoTitle" placeholder="비디오 제목 (자동 생성됨)">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="videoDescription">비디오 설명</label>
+                        <textarea id="videoDescription" placeholder="비디오 설명을 입력하세요"></textarea>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="privacyStatus">공개 설정</label>
+                        <select id="privacyStatus">
+                            <option value="private">비공개</option>
+                            <option value="unlisted">링크 공유</option>
+                            <option value="public">공개</option>
+                        </select>
+                    </div>
+                    
+                    <button class="btn" onclick="saveYouTubeSettings()">
+                        설정 저장
+                    </button>
                 </div>
             </div>
 
@@ -327,6 +409,13 @@
                     downloadBtn.onclick = () => {
                         window.open(response.downloadUrl, '_blank');
                     };
+                    
+                    const youtubeBtn = document.getElementById('youtubeBtn');
+                    youtubeBtn.style.display = 'inline-block';
+                    youtubeBtn.onclick = () => {
+                        const filename = response.downloadUrl.split('/').pop();
+                        uploadToYouTube(filename);
+                    };
                     loadFileList(); // 파일 목록 새로고침
                 } else {
                     const error = JSON.parse(xhr.responseText);
@@ -372,9 +461,14 @@
                                     <div class="file-name">${file.name}</div>
                                     <div class="file-size">${formatFileSize(file.size)}</div>
                                 </div>
-                                <button class="btn" onclick="window.open('${file.downloadUrl}', '_blank')">
-                                    다운로드
-                                </button>
+                                <div>
+                                    <button class="btn" onclick="window.open('${file.downloadUrl}', '_blank')">
+                                        다운로드
+                                    </button>
+                                    <button class="btn youtube-btn" onclick="uploadToYouTube('${file.name}')" style="margin-left: 10px;">
+                                        YouTube 업로드
+                                    </button>
+                                </div>
                             `;
                             fileItems.appendChild(fileItem);
                         });
@@ -396,8 +490,87 @@
             return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
         }
 
-        // 페이지 로드 시 파일 목록 로드
-        document.addEventListener('DOMContentLoaded', loadFileList);
+        // YouTube 폼 토글
+        function toggleYouTubeForm() {
+            const form = document.getElementById('youtubeForm');
+            form.style.display = form.style.display === 'none' ? 'block' : 'none';
+        }
+
+        // YouTube 설정 저장
+        function saveYouTubeSettings() {
+            const apiKey = document.getElementById('apiKey').value;
+            if (!apiKey) {
+                alert('API 키를 입력해주세요.');
+                return;
+            }
+            
+            localStorage.setItem('youtube_api_key', apiKey);
+            localStorage.setItem('youtube_title', document.getElementById('videoTitle').value);
+            localStorage.setItem('youtube_description', document.getElementById('videoDescription').value);
+            localStorage.setItem('youtube_privacy', document.getElementById('privacyStatus').value);
+            
+            alert('YouTube 설정이 저장되었습니다.');
+        }
+
+        // YouTube 업로드
+        async function uploadToYouTube(filename) {
+            const apiKey = localStorage.getItem('youtube_api_key');
+            if (!apiKey) {
+                alert('먼저 YouTube 업로드 설정에서 API 키를 입력해주세요.');
+                toggleYouTubeForm();
+                return;
+            }
+
+            const title = localStorage.getItem('youtube_title') || `인코딩된 비디오 - ${filename}`;
+            const description = localStorage.getItem('youtube_description') || 'Video Encoding Server로 인코딩된 비디오입니다.';
+            const privacy = localStorage.getItem('youtube_privacy') || 'private';
+
+            try {
+                showResult('success', '업로드 중...', 'YouTube에 업로드하고 있습니다. 잠시만 기다려주세요.');
+                
+                const response = await fetch('/upload-youtube', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        filename: filename,
+                        apiKey: apiKey,
+                        title: title,
+                        description: description,
+                        privacy: privacy
+                    })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    showResult('success', 'YouTube 업로드 완료!', 
+                        `비디오가 성공적으로 업로드되었습니다. URL: ${result.url}`);
+                } else {
+                    showResult('error', 'YouTube 업로드 실패', result.error || '업로드 중 오류가 발생했습니다.');
+                }
+            } catch (error) {
+                console.error('YouTube 업로드 오류:', error);
+                showResult('error', '오류', 'YouTube 업로드 중 네트워크 오류가 발생했습니다.');
+            }
+        }
+
+        // 페이지 로드 시 설정 복원 및 파일 목록 로드
+        document.addEventListener('DOMContentLoaded', () => {
+            // 저장된 YouTube 설정 복원
+            const savedApiKey = localStorage.getItem('youtube_api_key');
+            const savedTitle = localStorage.getItem('youtube_title');
+            const savedDescription = localStorage.getItem('youtube_description');
+            const savedPrivacy = localStorage.getItem('youtube_privacy');
+            
+            if (savedApiKey) document.getElementById('apiKey').value = savedApiKey;
+            if (savedTitle) document.getElementById('videoTitle').value = savedTitle;
+            if (savedDescription) document.getElementById('videoDescription').value = savedDescription;
+            if (savedPrivacy) document.getElementById('privacyStatus').value = savedPrivacy;
+            
+            loadFileList();
+        });
     </script>
 </body>
 </html>
