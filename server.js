@@ -335,25 +335,159 @@ app.post('/api/process-video', upload.any(), async (req, res) => {
       }
     }
 
+    // 텍스트 이스케이핑 함수
+    const escapeFFmpegText = (text) => {
+      if (!text) return '';
+      return text
+        .replace(/\\/g, '\\\\')    // 백슬래시
+        .replace(/'/g, "\\'")      // 작은따옴표
+        .replace(/"/g, '\\"')      // 큰따옴표
+        .replace(/:/g, '\\:')      // 콜론
+        .replace(/\[/g, '\\[')     // 대괄호
+        .replace(/\]/g, '\\]')     // 대괄호
+        .replace(/,/g, '\\,')      // 쉼표
+        .replace(/;/g, '\\;');     // 세미콜론
+    };
+
+    // 자막 추가 (drawtext 필터) - 안전한 방식
+    let finalVideoStream = '[0:v]';
+    
+    if (settings.subtitles && settings.subtitles.length > 0) {
+      console.log('\n📝 === 자막 추가 ===');
+      
+      // 폰트 확인 함수
+      const checkFontExists = async (fontPath) => {
+        try {
+          await fs.access(fontPath);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      
+      // 사용 가능한 폰트 찾기
+      const fontPaths = [
+        '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+        '/usr/share/fonts/TTF/NotoSansCJK-Regular.ttc',
+        '/System/Library/Fonts/Arial.ttf'
+      ];
+      
+      let availableFont = null;
+      for (const fontPath of fontPaths) {
+        if (await checkFontExists(fontPath)) {
+          availableFont = fontPath;
+          console.log(`✅ 사용할 폰트: ${fontPath}`);
+          break;
+        }
+      }
+      
+      if (!availableFont) {
+        console.log('⚠️ 시스템 폰트를 사용합니다 (폰트 파일을 찾을 수 없음)');
+      }
+
+      // 모든 자막을 하나의 복합 필터로 처리
+      const drawTextFilters = [];
+      
+      settings.subtitles.forEach((subtitle, index) => {
+        const safeText = escapeFFmpegText(subtitle.text || `자막 ${index + 1}`);
+        const fontSize = Math.max(12, Math.min(72, subtitle.fontSize || 24)); // 안전한 범위
+        const fontColor = subtitle.fontColor || 'white';
+        const x = subtitle.x || '(w-text_w)/2';
+        const y = subtitle.y || 'h-th-50';
+        const startTime = Math.max(0, subtitle.startTime || 0);
+        const duration = Math.max(1, subtitle.duration || 3);
+        
+        console.log(`  자막 ${index + 1}: "${safeText}"`);
+        console.log(`    시간: ${startTime}s~${startTime + duration}s`);
+        console.log(`    크기: ${fontSize}px, 색상: ${fontColor}`);
+        
+        // 안전한 drawtext 필터 생성
+        let drawtextOptions = [
+          `text='${safeText}'`,
+          `fontsize=${fontSize}`,
+          `fontcolor=${fontColor}`,
+          `x=${x}`,
+          `y=${y}`,
+          `enable='between(t,${startTime},${startTime + duration})'`
+        ];
+        
+        if (availableFont) {
+          drawtextOptions.unshift(`fontfile='${availableFont}'`);
+        }
+        
+        const inputStream = index === 0 ? '[0:v]' : `[v${index - 1}]`;
+        const outputStream = `[v${index}]`;
+        
+        drawTextFilters.push(`${inputStream}drawtext=${drawtextOptions.join(':')}${outputStream}`);
+      });
+      
+      if (drawTextFilters.length > 0) {
+        // 모든 자막 필터를 순차적으로 적용
+        ffmpegCommand = ffmpegCommand.complexFilter(drawTextFilters);
+        finalVideoStream = `[v${settings.subtitles.length - 1}]`;
+        console.log(`📝 ${settings.subtitles.length}개 자막 필터 적용 완료`);
+      }
+    }
+
+    // 최종 출력 매핑 설정
+    if (finalVideoStream !== '[0:v]') {
+      ffmpegCommand = ffmpegCommand.outputOptions(['-map', finalVideoStream.replace(/[\[\]]/g, '')]);
+    }
+
     // FFmpeg 실행
     console.log('\n⚙️ === FFmpeg 실행 ===');
+    console.log(`📺 최종 비디오 스트림: ${finalVideoStream}`);
+    
     await new Promise((resolve, reject) => {
       ffmpegCommand
         .on('start', (cmd) => {
           console.log('🚀 FFmpeg 명령어 시작');
-          console.log('명령어:', cmd.substring(0, 200) + '...');
+          console.log('📋 전체 명령어:');
+          console.log(cmd);
+          console.log('================================================================================');
         })
         .on('progress', (progress) => {
           if (progress.percent) {
             console.log(`📊 조립 진행률: ${Math.round(progress.percent)}%`);
           }
         })
+        .on('stderr', (stderrLine) => {
+          console.log('🔍 FFmpeg stderr:', stderrLine);
+        })
         .on('end', () => {
           console.log('✅ 영상 조립 완료');
           resolve();
         })
         .on('error', (err) => {
-          console.error('❌ FFmpeg 조립 오류:', err);
+          console.error('\n💥 === FFmpeg 오류 상세 분석 ===');
+          console.error('📝 오류 메시지:', err.message);
+          console.error('🔍 오류 코드:', err.code || 'N/A');
+          
+          if (err.stderr) {
+            console.error('\n📋 FFmpeg stderr 전체 출력:');
+            console.error('================================================================================');
+            console.error(err.stderr);
+            console.error('================================================================================');
+            
+            // 일반적인 오류 패턴 분석
+            const stderr = err.stderr.toLowerCase();
+            if (stderr.includes('font') || stderr.includes('fontconfig')) {
+              console.error('🚨 폰트 관련 오류 감지됨');
+            }
+            if (stderr.includes('invalid argument') || stderr.includes('syntax error')) {
+              console.error('🚨 명령어 문법 오류 감지됨');
+            }
+            if (stderr.includes('no such file')) {
+              console.error('🚨 파일 경로 오류 감지됨');
+            }
+          }
+          
+          console.error('\n🔧 디버깅 정보:');
+          console.error('- 입력 파일들이 모두 존재하는지 확인');
+          console.error('- 폰트 파일이 서버에 설치되어 있는지 확인');
+          console.error('- 자막 텍스트에 특수문자가 포함되어 있는지 확인');
+          
           reject(err);
         })
         .run();
@@ -507,14 +641,43 @@ app.post('/api/test-upload', upload.any(), (req, res) => {
   }
 });
 
+// 폰트 환경 확인
+const checkFonts = async () => {
+  const { exec } = require('child_process');
+  const util = require('util');
+  const execAsync = util.promisify(exec);
+  
+  console.log('\n🔍 === 서버 환경 폰트 확인 ===');
+  
+  try {
+    // fc-list 명령어로 설치된 폰트 확인
+    const { stdout } = await execAsync('fc-list | grep -i noto || echo "Noto 폰트 없음"');
+    console.log('📝 설치된 Noto 폰트들:');
+    console.log(stdout || '없음');
+  } catch (error) {
+    console.log('⚠️ 폰트 확인 실패:', error.message);
+  }
+  
+  try {
+    // FFmpeg 버전 확인
+    const { stdout: ffmpegVersion } = await execAsync('ffmpeg -version | head -1');
+    console.log('🎬 FFmpeg 버전:', ffmpegVersion.trim());
+  } catch (error) {
+    console.log('⚠️ FFmpeg 확인 실패:', error.message);
+  }
+};
+
 // 서버 시작
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, '0.0.0.0', async () => {
   console.log(`🚀 영상 인코딩 서버가 다음 주소에서 실행 중입니다:`);
   console.log(`   - 로컬: http://localhost:${PORT}`);
   console.log(`   - 네트워크: http://0.0.0.0:${PORT}`);
   console.log('📁 업로드 폴더:', uploadDir);
   console.log('📁 출력 폴더:', outputDir);
   console.log('🌐 외부 서비스에서 접근 가능합니다.');
+  
+  // 환경 확인
+  await checkFonts();
 });
 
 module.exports = app;
