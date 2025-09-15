@@ -145,8 +145,80 @@ app.get('/files', (req, res) => {
 });
 
 // 라우트: 외부 서비스용 영상 처리 API
-app.post('/api/process-video', async (req, res) => {
+app.post('/api/process-video', upload.single('video'), async (req, res) => {
   try {
+    console.log('API 요청 수신:', {
+      hasFile: !!req.file,
+      hasBody: !!req.body,
+      bodyKeys: Object.keys(req.body || {}),
+      contentType: req.headers['content-type']
+    });
+
+    // FormData로 전송된 파일 처리
+    if (req.file) {
+      console.log('파일 업로드 방식으로 처리:', req.file.originalname);
+      
+      const inputPath = req.file.path;
+      const outputFileName = `processed-${Date.now()}.mp4`;
+      const outputPath = path.join(outputDir, outputFileName);
+
+      // 설정값 파싱 (FormData에서 문자열로 전송됨)
+      let settings = {};
+      if (req.body.settings) {
+        try {
+          settings = JSON.parse(req.body.settings);
+        } catch (e) {
+          console.log('설정값 파싱 실패, 기본값 사용');
+        }
+      }
+
+      // FFmpeg 인코딩
+      const ffmpegCommand = ffmpeg(inputPath)
+        .output(outputPath)
+        .videoCodec('libx264')
+        .audioCodec('aac')
+        .size(settings?.resolution || '1280x720')
+        .videoBitrate(settings?.videoBitrate || '1000k')
+        .audioBitrate(settings?.audioBitrate || '128k');
+
+      await new Promise((resolve, reject) => {
+        ffmpegCommand
+          .on('start', (commandLine) => {
+            console.log('FFmpeg 명령어:', commandLine);
+          })
+          .on('progress', (progress) => {
+            console.log('진행률:', Math.round(progress.percent) + '%');
+          })
+          .on('end', () => {
+            console.log('외부 서비스 영상 처리 완료:', outputFileName);
+            resolve();
+          })
+          .on('error', (err) => {
+            console.error('인코딩 오류:', err);
+            reject(err);
+          })
+          .run();
+      });
+
+      // 원본 파일 삭제
+      await fs.remove(inputPath);
+
+      // 처리된 파일을 base64로 변환
+      const processedBuffer = await fs.readFile(outputPath);
+      const processedBase64 = processedBuffer.toString('base64');
+
+      res.json({
+        success: true,
+        message: '영상 처리가 완료되었습니다.',
+        outputFile: outputFileName,
+        downloadUrl: `/download/${outputFileName}`,
+        processedData: `data:video/mp4;base64,${processedBase64}`,
+        fileSize: processedBuffer.length
+      });
+      return;
+    }
+
+    // JSON 방식 (기존 코드 유지)
     const { videoData, filename, settings } = req.body;
     
     if (!videoData) {
